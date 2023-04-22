@@ -1,4 +1,4 @@
-const styleColors = {
+﻿const styleColors = {
     "--results-bg": ["#0b0f19", "#ffffff"],
     "--results-border-color": ["#4b5563", "#e5e7eb"],
     "--results-border-width": ["1px", "1.5px"],
@@ -24,11 +24,6 @@ const autocompleteCSS = `
     }
     #quicksettings [id^=setting_tac] > label > span {
         margin-bottom: 0px;
-    }
-    [id^=refresh_tac] {
-        max-width: 2.5em;
-        min-width: 2.5em;
-        height: 2.4em;
     }
     .autocompleteResults {
         position: absolute;
@@ -98,6 +93,10 @@ async function loadTags(c) {
     if (c.extra.extraFile && c.extra.extraFile !== "None") {
         try {
             extras = await loadCSV(`${tagBasePath}/${c.extra.extraFile}`);
+            // Add translations to the main translation map for extra tags that have them
+            extras.forEach(e => {
+                if (e[4]) translations.set(e[0], e[4]);
+            });
         } catch (e) {
             console.error("Error loading extra file: " + e);
             return;
@@ -146,6 +145,7 @@ async function syncOptions() {
         useEmbeddings: opts["tac_useEmbeddings"],
         useHypernetworks: opts["tac_useHypernetworks"],
         useLoras: opts["tac_useLoras"],
+	useLycos: opts["tac_useLycos"],
         showWikiLinks: opts["tac_showWikiLinks"],
         // Insertion related settings
         replaceUnderscores: opts["tac_replaceUnderscores"],
@@ -168,25 +168,25 @@ async function syncOptions() {
             addMode: opts["tac_extra.addMode"]
         },
         // Settings not from tac but still used by the script
-        extraNetworksDefaultMultiplier: opts["extra_networks_default_multiplier"]
-    }
-
-    if (CFG && CFG.colors) {
-        newCFG["colors"] = CFG.colors;
+        extraNetworksDefaultMultiplier: opts["extra_networks_default_multiplier"],
+        extraNetworksSeparator: opts["extra_networks_add_text_separator"],
+        // Custom mapping settings
+        keymap: JSON.parse(opts["tac_keymap"]),
+        colorMap: JSON.parse(opts["tac_colormap"])
     }
     if (newCFG.alias.onlyShowAlias) {
         newCFG.alias.searchByAlias = true; // if only show translation, enable search by translation is necessary
     }
 
-    // Reload tags if the tag file changed
-    if (!CFG || newCFG.tagFile !== CFG.tagFile || newCFG.extra.extraFile !== CFG.extra.extraFile) {
-        allTags = [];
-        await loadTags(newCFG);
-    }
     // Reload translations if the translation file changed
     if (!CFG || newCFG.translation.translationFile !== CFG.translation.translationFile) {
         translations.clear();
         await loadTranslations(newCFG);
+    }
+    // Reload tags if the tag file changed (after translations so extra tag translations get re-added)
+    if (!CFG || newCFG.tagFile !== CFG.tagFile || newCFG.extra.extraFile !== CFG.extra.extraFile) {
+        allTags = [];
+        await loadTags(newCFG);
     }
 
     // Update CSS if maxResults changed
@@ -206,14 +206,15 @@ async function syncOptions() {
 // Create the result list div and necessary styling
 function createResultsDiv(textArea) {
     let resultsDiv = document.createElement("div");
-    let resultsList = document.createElement('ul');
+    let resultsList = document.createElement("ul");
 
     let textAreaId = getTextAreaIdentifier(textArea);
     let typeClass = textAreaId.replaceAll(".", " ");
 
     resultsDiv.style.maxHeight = `${CFG.maxResults * 50}px`;
-    resultsDiv.setAttribute('class', `autocompleteResults ${typeClass}`);
-    resultsList.setAttribute('class', 'autocompleteResultsList');
+    resultsDiv.setAttribute("class", `autocompleteResults ${typeClass} notranslate`);
+    resultsDiv.setAttribute("translate", "no");
+    resultsList.setAttribute("class", "autocompleteResultsList");
     resultsDiv.appendChild(resultsList);
 
     return resultsDiv;
@@ -233,7 +234,7 @@ function showResults(textArea) {
     if (CFG.slidingPopup) {
         let caretPosition = getCaretCoordinates(textArea, textArea.selectionEnd).left;
         let offset = Math.min(textArea.offsetLeft - textArea.scrollLeft + caretPosition, textArea.offsetWidth - resultsDiv.offsetWidth);
-
+    
         resultsDiv.style.left = `${offset}px`;
     } else {
         if (resultsDiv.style.left)
@@ -243,6 +244,9 @@ function showResults(textArea) {
 function hideResults(textArea) {
     let textAreaId = getTextAreaIdentifier(textArea);
     let resultsDiv = gradioApp().querySelector('.autocompleteResults' + textAreaId);
+    
+    if (!resultsDiv) return;
+    
     resultsDiv.style.display = "none";
     selectedTag = null;
 }
@@ -250,29 +254,33 @@ function hideResults(textArea) {
 // Function to check activation criteria
 function isEnabled() {
     if (CFG.activeIn.global) {
+        // Skip check if the current model was not correctly detected, since it could wrongly disable the script otherwise
+        if (!currentModelName || !currentModelHash) return true;
+        
         let modelList = CFG.activeIn.modelList
             .split(",")
             .map(x => x.trim())
             .filter(x => x.length > 0);
-
+        
         let shortHash = currentModelHash.substring(0, 10);
+        let modelNameWithoutHash = currentModelName.replace(/\[.*\]$/g, "").trim();
         if (CFG.activeIn.modelListMode.toLowerCase() === "blacklist") {
             // If the current model is in the blacklist, disable
-            return modelList.filter(x => x === currentModelName || x === currentModelHash || x === shortHash).length === 0;
+            return modelList.filter(x => x === currentModelName || x === modelNameWithoutHash || x === currentModelHash || x === shortHash).length === 0;
         } else {
             // If the current model is in the whitelist, enable.
             // An empty whitelist is ignored.
-            return modelList.length === 0 || modelList.filter(x => x === currentModelName || x === currentModelHash || x === shortHash).length > 0;
+            return modelList.length === 0 || modelList.filter(x => x === currentModelName || x === modelNameWithoutHash || x === currentModelHash || x === shortHash).length > 0;
         }
     } else {
         return false;
     }
 }
 
-const WEIGHT_REGEX = /[([]([^,()[\]:| ]+)(?::(?:\d+(?:\.\d+)?|\.\d+))?[)\]]/g;
+const WEIGHT_REGEX = /[([]([^()[\]:|]+)(?::(?:\d+(?:\.\d+)?|\.\d+))?[)\]]/g;
 const POINTY_REGEX = /<[^\s,<](?:[^\t\n\r,<>]*>|[^\t\n\r,> ]*)/g;
 const COMPLETED_WILDCARD_REGEX = /__[^\s,_][^\t\n\r,_]*[^\s,_]__[^\s,_]*/g;
-const NORMAL_TAG_REGEX = /[^\s,|<>]+|</g;
+const NORMAL_TAG_REGEX = /[^\s,|<>)\]]+|</g;
 const TAG_REGEX = new RegExp(`${POINTY_REGEX.source}|${COMPLETED_WILDCARD_REGEX.source}|${NORMAL_TAG_REGEX.source}`, "g");
 
 // On click, insert the tag into the prompt textbox with respect to the cursor position
@@ -309,18 +317,23 @@ async function insertTextAtCursor(textArea, result, tagword) {
     let match = surrounding.match(new RegExp(escapeRegExp(`${tagword}`), "i"));
     let afterInsertCursorPos = editStart + match.index + sanitizedText.length;
 
-    var optionalComma = "";
-    if (CFG.appendComma && ![ResultType.wildcardFile, ResultType.yamlWildcard].includes(tagType)) {
-        optionalComma = surrounding.match(new RegExp(`${escapeRegExp(tagword)}[,:]`, "i")) !== null ? "" : ", ";
+    var optionalSeparator = "";
+    let extraNetworkTypes = [ResultType.hypernetwork, ResultType.lora];
+    let noCommaTypes = [ResultType.wildcardFile, ResultType.yamlWildcard].concat(extraNetworkTypes);
+    if (CFG.appendComma && !noCommaTypes.includes(tagType)) {
+        optionalSeparator = surrounding.match(new RegExp(`${escapeRegExp(tagword)}[,:]`, "i")) !== null ? "" : ", ";
+    } else if (extraNetworkTypes.includes(tagType)) {
+        // Use the dedicated separator for extra networks if it's defined, otherwise fall back to space
+        optionalSeparator = CFG.extraNetworksSeparator || " ";
     }
 
     // Replace partial tag word with new text, add comma if needed
-    let insert = surrounding.replace(match, sanitizedText + optionalComma);
+    let insert = surrounding.replace(match, sanitizedText + optionalSeparator);
 
     // Add back start
     var newPrompt = prompt.substring(0, editStart) + insert + prompt.substring(editEnd);
     textArea.value = newPrompt;
-    textArea.selectionStart = afterInsertCursorPos + optionalComma.length;
+    textArea.selectionStart = afterInsertCursorPos + optionalSeparator.length;
     textArea.selectionEnd = textArea.selectionStart
 
     // Since we've modified a Gradio Textbox component manually, we need to simulate an `input` DOM event to ensure it's propagated back to python.
@@ -329,7 +342,7 @@ async function insertTextAtCursor(textArea, result, tagword) {
 
     // Update previous tags with the edited prompt to prevent re-searching the same term
     let weightedTags = [...newPrompt.matchAll(WEIGHT_REGEX)]
-        .map(match => match[1]);
+            .map(match => match[1]);
     let tags = newPrompt.match(TAG_REGEX)
     if (weightedTags !== null) {
         tags = tags.filter(tag => !weightedTags.some(weighted => tag.includes(weighted)))
@@ -347,82 +360,6 @@ async function insertTextAtCursor(textArea, result, tagword) {
     if (!hideBlocked && isVisible(textArea)) {
         hideResults(textArea);
     }
-
-    ///aliu
-    // for
-    // document.getElementById("txt2img_prompt")
-    // textArea.appendChild(inputElement)
-
-    // updateInput(tb_type)
-    inputWords(textArea)
-    // debugger;
-}
-
-//create by aliu
-function inputWords(textArea) {
-    let textAreatxt = textArea.value
-    let idx = "";
-    if (textArea.parentNode.parentNode.id=="txt2img_neg_prompt") {
-        idx = "txt2img_neg_prompt";
-    } else {
-        idx = "txt2img_prompt";
-    }
-    let alertPromptSpan = gradioApp().querySelector("#" + idx + "Span")
-    if (textAreatxt == '') {
-        if (alertPromptSpan != null) {
-            alertPromptSpan.innerHTML = "";
-        }
-        return '';
-    }
-    textAreatxt = textAreatxt
-        .replaceAll("\\(", "(")
-        .replaceAll("\\)", ")")
-        .replaceAll("\\[", "[")
-        .replaceAll("\\]", "]")
-        .replaceAll(" ,", ",")
-        .replaceAll(", ", ",")
-        .replaceAll(",)", ")")
-        .replaceAll(" )", ")")
-        .replaceAll("( ", "(");
-    let txtarr = textAreatxt.split(",");
-    let alertPrompt = "";
-    for (i = 0; i < txtarr.length; i++) {
-        let wordtxt = txtarr[i]
-        if (wordtxt == '') {
-            continue;
-        }
-
-        wordtxt = wordtxt.replaceAll(" ", "_")
-        let pattern = /\((\w+):\d+\)/;
-        wordtxt = wordtxt.replace(pattern, "$1");
-        wordtxt = wordtxt.replaceAll("(", "")
-        wordtxt = wordtxt.replaceAll(")", "")
-        wordtxt = wordtxt.replaceAll(",", "")
-        var tArray = [...translations];
-        if (tArray) {
-            let translationKey = [...translations].find(pair => pair[0].includes(wordtxt));
-            wordtxt = wordtxt.replaceAll("_", " ")
-            if (translationKey) {
-                alertPrompt += wordtxt + "=>" + translationKey[1];
-            } else {
-                alertPrompt += wordtxt;
-            }
-            alertPrompt += ",";
-        }
-        // textAreatxt = textAreatxt.replaceAll(" ", "_");//.replaceAll("","").replaceAll("","").replaceAll("","").replaceAll("","")
-    }
-
-    let alertPromptDiv = gradioApp().querySelector("#" + idx);
-    if (!alertPromptSpan) {
-        var spanx = document.createElement("span");
-        spanx.id = idx + "Span";
-        spanx.innerHTML = alertPrompt;
-        alertPromptDiv.appendChild(spanx);
-        console.log(alertPrompt)
-    } else {
-        alertPromptSpan.innerHTML = alertPrompt;
-    }
-
 }
 
 function addResultsToList(textArea, results, tagword, resetList) {
@@ -440,7 +377,7 @@ function addResultsToList(textArea, results, tagword, resetList) {
 
     // Find right colors from config
     let tagFileName = CFG.tagFile.split(".")[0];
-    let tagColors = CFG.colors;
+    let tagColors = CFG.colorMap;
     let mode = gradioApp().querySelector('.dark') ? 0 : 1;
     let nextLength = Math.min(results.length, resultCount + CFG.resultStepLength);
 
@@ -508,7 +445,7 @@ function addResultsToList(textArea, results, tagword, resetList) {
             // Only use alias result if it is one
             if (displayText.includes("➝"))
                 linkPart = displayText.split(" ➝ ")[1];
-
+            
             // Set link based on selected file
             let tagFileNameLower = tagFileName.toLowerCase();
             if (tagFileNameLower.startsWith("danbooru")) {
@@ -516,7 +453,7 @@ function addResultsToList(textArea, results, tagword, resetList) {
             } else if (tagFileNameLower.startsWith("e621")) {
                 wikiLink.href = `https://e621.net/wiki_pages/${linkPart}`;
             }
-
+            
             wikiLink.target = "_blank";
             flexDiv.appendChild(wikiLink);
         }
@@ -549,7 +486,7 @@ function addResultsToList(textArea, results, tagword, resetList) {
             if (postCount >= 1000000 || (postCount >= 1000 && postCount < 10000))
                 formatter = Intl.NumberFormat("en", { notation: "compact", minimumFractionDigits: 1, maximumFractionDigits: 1 });
             else
-                formatter = Intl.NumberFormat("en", { notation: "compact" });
+                formatter = Intl.NumberFormat("en", {notation: "compact"});
 
             let formattedCount = formatter.format(postCount);
 
@@ -569,7 +506,7 @@ function addResultsToList(textArea, results, tagword, resetList) {
                 else if (result.meta.startsWith("v2"))
                     itemText.classList.add("acEmbeddingV2");
             }
-
+                
             flexDiv.appendChild(metaDiv);
         }
 
@@ -703,54 +640,51 @@ async function autocomplete(textArea, prompt, fixedTag = null) {
         } else {
             searchRegex = new RegExp(`(^|[^a-zA-Z])${escapeRegExp(tagword)}`, 'i');
         }
-        // If onlyShowAlias is enabled, we don't need to include normal results
-        if (CFG.alias.onlyShowAlias) {
-            results = allTags.filter(x => x[3] && x[3].toLowerCase().search(searchRegex) > -1);
-        } else {
-            // Else both normal tags and aliases/translations are included depending on the config
-            let baseFilter = (x) => x[0].toLowerCase().search(searchRegex) > -1;
-            let aliasFilter = (x) => x[3] && x[3].toLowerCase().search(searchRegex) > -1;
-            let translationFilter = (x) => (translations.has(x[0]) && translations.get(x[0]).toLowerCase().search(searchRegex) > -1)
-                || x[3] && x[3].split(",").some(y => translations.has(y) && translations.get(y).toLowerCase().search(searchRegex) > -1);
 
-            let fil;
-            if (CFG.alias.searchByAlias && CFG.translation.searchByTranslation)
-                fil = (x) => baseFilter(x) || aliasFilter(x) || translationFilter(x);
-            else if (CFG.alias.searchByAlias && !CFG.translation.searchByTranslation)
-                fil = (x) => baseFilter(x) || aliasFilter(x);
-            else if (CFG.translation.searchByTranslation && !CFG.alias.searchByAlias)
-                fil = (x) => baseFilter(x) || translationFilter(x);
-            else
-                fil = (x) => baseFilter(x);
+        // Both normal tags and aliases/translations are included depending on the config
+        let baseFilter = (x) => x[0].toLowerCase().search(searchRegex) > -1;
+        let aliasFilter = (x) => x[3] && x[3].toLowerCase().search(searchRegex) > -1;
+        let translationFilter = (x) => (translations.has(x[0]) && translations.get(x[0]).toLowerCase().search(searchRegex) > -1)
+            || x[3] && x[3].split(",").some(y => translations.has(y) && translations.get(y).toLowerCase().search(searchRegex) > -1);
+        
+        let fil;
+        if (CFG.alias.searchByAlias && CFG.translation.searchByTranslation)
+            fil = (x) => baseFilter(x) || aliasFilter(x) || translationFilter(x);
+        else if (CFG.alias.searchByAlias && !CFG.translation.searchByTranslation)
+            fil = (x) => baseFilter(x) || aliasFilter(x);
+        else if (CFG.translation.searchByTranslation && !CFG.alias.searchByAlias)
+            fil = (x) => baseFilter(x) || translationFilter(x);
+        else
+            fil = (x) => baseFilter(x);
 
-            // Add final results
-            allTags.filter(fil).forEach(t => {
-                let result = new AutocompleteResult(t[0].trim(), ResultType.tag)
-                result.category = t[1];
-                result.count = t[2];
-                result.aliases = t[3];
-                results.push(result);
+        // Add final results
+        allTags.filter(fil).forEach(t => {
+            let result = new AutocompleteResult(t[0].trim(), ResultType.tag)
+            result.category = t[1];
+            result.count = t[2];
+            result.aliases = t[3];
+            results.push(result);
+        });
+
+        // Add extras
+        if (CFG.extra.extraFile) {
+            let extraResults = [];
+
+            extras.filter(fil).forEach(e => {
+                let result = new AutocompleteResult(e[0].trim(), ResultType.extra)
+                result.category = e[1] || 0; // If no category is given, use 0 as the default
+                result.meta = e[2] || "Custom tag";
+                result.aliases = e[3] || "";
+                extraResults.push(result);
             });
 
-            // Add extras
-            if (CFG.extra.extraFile) {
-                let extraResults = [];
-
-                extras.filter(fil).forEach(e => {
-                    let result = new AutocompleteResult(e[0].trim(), ResultType.extra)
-                    result.category = e[1] || 0; // If no category is given, use 0 as the default
-                    result.meta = e[2] || "Custom tag";
-                    result.aliases = e[3] || "";
-                    extraResults.push(result);
-                });
-
-                if (CFG.extra.addMode === "Insert before") {
-                    results = extraResults.concat(results);
-                } else {
-                    results = results.concat(extraResults);
-                }
+            if (CFG.extra.addMode === "Insert before") {
+                results = extraResults.concat(results);
+            } else {
+                results = results.concat(extraResults);
             }
         }
+        
         // Slice if the user has set a max result count
         if (!CFG.showAllResults) {
             results = results.slice(0, CFG.maxResults);
@@ -771,16 +705,18 @@ async function autocomplete(textArea, prompt, fixedTag = null) {
 function navigateInList(textArea, event) {
     // Return if the function is deactivated in the UI or the current model is excluded due to white/blacklist settings
     if (!isEnabled()) return;
+    
+    let keys = CFG.keymap;
 
     // Close window if Home or End is pressed while not a keybinding, since it would break completion on leaving the original tag
-    if ((event.key === "Home" || event.key === "End") && !Object.values(keymap).includes(event.key)) {
+    if ((event.key === "Home" || event.key === "End") && !Object.values(keys).includes(event.key)) {
         hideResults(textArea);
         return;
     }
 
     // All set keys that are not None or empty are valid
     // Default keys are: ArrowUp, ArrowDown, PageUp, PageDown, Home, End, Enter, Tab, Escape
-    validKeys = Object.values(keymap).filter(x => x !== "None" && x !== "");
+    validKeys = Object.values(keys).filter(x => x !== "None" && x !== "");
 
     if (!validKeys.includes(event.key)) return;
     if (!isVisible(textArea)) return
@@ -790,57 +726,60 @@ function navigateInList(textArea, event) {
     oldSelectedTag = selectedTag;
 
     switch (event.key) {
-        case keymap["MoveUp"]:
+        case keys["MoveUp"]:
             if (selectedTag === null) {
                 selectedTag = resultCount - 1;
             } else {
                 selectedTag = (selectedTag - 1 + resultCount) % resultCount;
             }
             break;
-        case keymap["MoveDown"]:
+        case keys["MoveDown"]:
             if (selectedTag === null) {
                 selectedTag = 0;
             } else {
                 selectedTag = (selectedTag + 1) % resultCount;
             }
             break;
-        case keymap["JumpUp"]:
+        case keys["JumpUp"]:
             if (selectedTag === null || selectedTag === 0) {
                 selectedTag = resultCount - 1;
             } else {
                 selectedTag = (Math.max(selectedTag - 5, 0) + resultCount) % resultCount;
             }
             break;
-        case keymap["JumpDown"]:
+        case keys["JumpDown"]:
             if (selectedTag === null || selectedTag === resultCount - 1) {
                 selectedTag = 0;
             } else {
                 selectedTag = Math.min(selectedTag + 5, resultCount - 1) % resultCount;
             }
             break;
-        case keymap["JumpToStart"]:
+        case keys["JumpToStart"]:
             selectedTag = 0;
             break;
-        case keymap["JumpToEnd"]:
+        case keys["JumpToEnd"]:
             selectedTag = resultCount - 1;
             break;
-        case keymap["ChooseSelected"]:
+        case keys["ChooseSelected"]:
             if (selectedTag !== null) {
                 insertTextAtCursor(textArea, results[selectedTag], tagword);
+            } else {
+                hideResults(textArea);
+                return;
             }
             break;
-        case keymap["ChooseFirstOrSelected"]:
+        case keys["ChooseFirstOrSelected"]:
             if (selectedTag === null) {
                 selectedTag = 0;
             }
             insertTextAtCursor(textArea, results[selectedTag], tagword);
             break;
-        case keymap["Close"]:
+        case keys["Close"]:
             hideResults(textArea);
             break;
     }
     if (selectedTag === resultCount - 1
-        && (event.key === keymap["MoveUp"] || event.key === keymap["MoveDown"] || event.key === keymap["JumpToStart"] || event.key === keymap["JumpToEnd"])) {
+        && (event.key === keys["MoveUp"] || event.key === keys["MoveDown"] || event.key === keys["JumpToStart"] || event.key === keys["JumpToEnd"])) {
         addResultsToList(textArea, results, tagword, false);
     }
     // Update highlighting
@@ -854,12 +793,6 @@ function navigateInList(textArea, event) {
 
 // One-time setup, triggered from onUiUpdate
 async function setup() {
-    // Load key bindings
-    keymap = (await readFile(`${tagBasePath}/keymap.json`, true));
-
-    // Load colors
-    CFG["colors"] = (await readFile(`${tagBasePath}/colors.json`, true));
-
     // Load external files needed by completion extensions
     await processQueue(QUEUE_FILE_LOAD, null);
 
@@ -870,7 +803,7 @@ async function setup() {
     let applySettingsButton = gradioApp().querySelector("#tab_settings #settings_submit") || gradioApp().querySelector("#tab_settings > div > .gr-button-primary");
     applySettingsButton?.addEventListener("click", () => {
         // Wait 500ms to make sure the settings have been applied to the webui opts object
-        setTimeout(async () => {
+        setTimeout(async () => { 
             await syncOptions();
         }, 500);
     });
@@ -879,20 +812,12 @@ async function setup() {
     let commonQueryPart = "[id^=setting_tac] > label >";
     quicksettings?.querySelectorAll(`${commonQueryPart} input, ${commonQueryPart} textarea, ${commonQueryPart} select`).forEach(e => {
         e.addEventListener("change", () => {
-            setTimeout(async () => {
+            setTimeout(async () => { 
                 await syncOptions();
             }, 500);
         });
     });
 
-    // Add change listener to model dropdown to react to model changes
-    let modelDropdown = gradioApp().querySelector("#setting_sd_model_checkpoint select");
-    currentModelName = modelDropdown.value;
-    modelDropdown?.addEventListener("change", () => {
-        setTimeout(() => {
-            currentModelName = modelDropdown.value;
-        }, 100);
-    });
     // Add mutation observer for the model hash text to also allow hash-based blacklist again
     let modelHashText = gradioApp().querySelector("#sd_checkpoint_hash");
     if (modelHashText) {
@@ -901,6 +826,14 @@ async function setup() {
             for (const mutation of mutationList) {
                 if (mutation.type === "attributes" && mutation.attributeName === "title") {
                     currentModelHash = mutation.target.title;
+                    let modelDropdown = gradioApp().querySelector("#setting_sd_model_checkpoint span.single-select")
+                    if (modelDropdown) {
+                        currentModelName = modelDropdown.textContent;
+                    } else {
+                        // Fallback for older versions
+                        modelDropdown = gradioApp().querySelector("#setting_sd_model_checkpoint select");
+                        currentModelName = modelDropdown.value;
+                    }
                 }
             }
         });
@@ -942,7 +875,6 @@ async function setup() {
             area.addEventListener('focusout', debounce(() => hideResults(area), 400));
             // Add up and down arrow event listener
             area.addEventListener('keydown', (e) => navigateInList(area, e));
-            area.addEventListener('focusout', (e) => inputWords(area));//aliu
             // CompositionEnd fires after the user has finished IME composing
             // We need to block hide here to prevent the enter key from insta-closing the results
             area.addEventListener('compositionend', () => {
@@ -961,7 +893,7 @@ async function setup() {
     let mode = gradioApp().querySelector('.dark') ? 0 : 1;
     // Check if we are on webkit
     let browser = navigator.userAgent.toLowerCase().indexOf('firefox') > -1 ? "firefox" : "other";
-
+    
     let css = autocompleteCSS;
     // Replace vars with actual values (can't use actual css vars because of the way we inject the css)
     Object.keys(styleColors).forEach((key) => {
@@ -970,7 +902,7 @@ async function setup() {
     Object.keys(browserVars).forEach((key) => {
         css = css.replace(`var(${key})`, browserVars[key][browser]);
     })
-
+    
     if (acStyle.styleSheet) {
         acStyle.styleSheet.cssText = css;
     } else {
